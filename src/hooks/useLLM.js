@@ -16,12 +16,14 @@ export function useLLM() {
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.9,
+        ]
       };
 
       if (enableThinking) {
         body.max_tokens = 32000;
+        body.reasoning_effort = 'low';
+      } else {
+        body.reasoning_effort = 'none';
       }
 
       const response = await fetch(`${endpoint}/chat/completions`, {
