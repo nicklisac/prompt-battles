@@ -33,11 +33,11 @@ export function generatePlayerName() {
 // Join a room channel
 export function joinRoomChannel(roomCode, onMessage) {
   const channel = supabase.channel(`room:${roomCode}`);
-  
+
   channel.on('broadcast', { event: '*' }, (payload) => {
-    if (onMessage) onMessage(payload.payload);
+    if (onMessage) onMessage(payload.payload.data);
   });
-  
+
   return {
     subscribe: (player) => {
       return channel.subscribe((status) => {
@@ -47,7 +47,11 @@ export function joinRoomChannel(roomCode, onMessage) {
       });
     },
     broadcast: (message) => {
-      channel.send({ type: 'broadcast', payload: message });
+      channel.send({
+        type: 'broadcast',
+        event: message.type,
+        payload: message,
+      });
     },
     unsubscribe: () => {
       supabase.removeChannel(channel);

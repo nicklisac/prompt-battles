@@ -33,7 +33,13 @@ export default function App() {
   
   const channelRef = useRef(null);
   const processPromptsRef = useRef(null);
+  const currentPlayerRef = useRef(currentPlayer);
+  const applyMessageRef = useRef(null);
   const { callLLM } = useLLM();
+
+  useEffect(() => {
+    currentPlayerRef.current = currentPlayer;
+  }, [currentPlayer]);
   
   // Store for round data
   const roundDataRef = useRef({ prompts: {}, results: {}, votes: [], gameScores: {}, gameTasks: [] });
@@ -49,12 +55,13 @@ export default function App() {
     return () => clearInterval(timer);
   }, [phase, timeLeft, currentPlayer]);
   
-  // Handle incoming messages
-  const handleMessage = useCallback((message) => {
+  // Apply message state changes (plain fn, no useCallback — kept fresh via ref)
+  function applyMessage(message, cp) {
+    const cur = cp || currentPlayerRef.current;
     switch (message.type) {
       case 'host:announce':
         setRoom({ code: message.roomCode, hostEndpoint: message.endpoint, hostModel: message.modelName, status: 'lobby' });
-        if (!currentPlayer?.isHost) setPlayers(prev => [...prev, message.player]);
+        if (!cur?.isHost) setPlayers(prev => [...prev, message.player]);
         break;
       case 'player:join':
         setPlayers(prev => prev.find(p => p.id === message.player.id) ? prev : [...prev, message.player]);
@@ -78,7 +85,7 @@ export default function App() {
         setPromptSubmitted(false);
         break;
       case 'prompt:submit':
-        if (currentPlayer?.isHost && message.senderId !== currentPlayer.id) {
+        if (cur?.isHost) {
           roundDataRef.current.prompts[message.playerId] = message.prompt;
         }
         break;
@@ -132,6 +139,17 @@ export default function App() {
         break;
       default: break;
     }
+  }
+
+  // Keep ref fresh so host game functions can call latest applyMessage
+  useEffect(() => {
+    applyMessageRef.current = applyMessage;
+  });
+
+  // Handle incoming Supabase messages (skip own echoes for prompt:submit)
+  const handleMessage = useCallback((message) => {
+    if (message.type === 'prompt:submit' && message.senderId === currentPlayer?.id) return;
+    applyMessage(message, currentPlayer);
   }, [currentPlayer]);
   
   // Broadcast message
@@ -179,17 +197,15 @@ export default function App() {
     roundDataRef.current.gameTasks = tasks;
     roundDataRef.current.gameScores = {};
     for (const p of players) roundDataRef.current.gameScores[p.id] = 0;
-    
-    broadcast({ type: 'game:start', round: 1, task: tasks[0] });
-    setTask(tasks[0]);
-    setRound(1);
-    
+
+    const startMsg = { type: 'game:start', round: 1, task: tasks[0] };
+    applyMessageRef.current(startMsg);
+    broadcast(startMsg);
+
     setTimeout(() => {
-      setShowTask(false);
-      setPhase(PHASES.PROMPTING);
-      setTimeLeft(60);
-      setPromptSubmitted(false);
-      broadcast({ type: 'round:prompting' });
+      const promptingMsg = { type: 'round:prompting' };
+      applyMessageRef.current(promptingMsg);
+      broadcast(promptingMsg);
     }, 3000);
   };
   
@@ -282,32 +298,22 @@ export default function App() {
   const handleNextRound = () => {
     if (round >= totalRounds) {
       const finalLeaderboard = players.map(p => ({ playerName: p.name, totalScore: roundDataRef.current.gameScores[p.id] || 0 })).sort((a, b) => b.totalScore - a.totalScore);
-      broadcast({ type: 'game:end', leaderboard: finalLeaderboard });
-      setLeaderboard(finalLeaderboard);
-      setPhase(PHASES.FINISHED);
+      const endMsg = { type: 'game:end', leaderboard: finalLeaderboard };
+      applyMessageRef.current(endMsg);
+      broadcast(endMsg);
     } else {
       const nextTask = roundDataRef.current.gameTasks[round];
       roundDataRef.current.prompts = {};
       roundDataRef.current.results = {};
       roundDataRef.current.votes = [];
-      setResults([]);
-      setVotes([]);
-      setPrompt('');
-      broadcast({ type: 'round:next', round: round + 1, task: nextTask });
-      setTask(nextTask);
-      setRound(round + 1);
-      setPhase(PHASES.TASK);
-      setShowTask(false);
+      const nextMsg = { type: 'round:next', round: round + 1, task: nextTask };
+      applyMessageRef.current(nextMsg);
+      broadcast(nextMsg);
       setTimeout(() => {
-        setShowTask(true);
-        setTimeout(() => {
-          setShowTask(false);
-          setPhase(PHASES.PROMPTING);
-          setTimeLeft(60);
-          setPromptSubmitted(false);
-          broadcast({ type: 'round:prompting' });
-        }, 3000);
-      }, 500);
+        const promptingMsg = { type: 'round:prompting' };
+        applyMessageRef.current(promptingMsg);
+        broadcast(promptingMsg);
+      }, 3500);
     }
   };
   
