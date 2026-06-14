@@ -9,13 +9,19 @@ const PHASES = { LOBBY: 'lobby', TASK: 'task', PROMPTING: 'prompting', PROCESSIN
 export default function App() {
   const [screen, setScreen] = useState('home');
   const [roomCode, setRoomCode] = useState('');
-  const [endpoint, setEndpoint] = useState('http://localhost:1234/v1');
-  const [apiKey, setApiKey] = useState('');
-  const [modelName, setModelName] = useState('');
+  const [endpoint, setEndpoint] = useState(() => localStorage.getItem('pb_endpoint') || 'http://localhost:1234/v1');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('pb_apikey') || '');
+  const [modelName, setModelName] = useState(() => localStorage.getItem('pb_model') || '');
+  const [enableThinking, setEnableThinking] = useState(() => localStorage.getItem('pb_thinking') !== 'false');
   const [playerName, setPlayerName] = useState('');
   const [endpointVerified, setEndpointVerified] = useState(false);
   const [testingEndpoint, setTestingEndpoint] = useState(false);
   const [testError, setTestError] = useState('');
+
+  useEffect(() => { localStorage.setItem('pb_endpoint', endpoint); }, [endpoint]);
+  useEffect(() => { localStorage.setItem('pb_apikey', apiKey); }, [apiKey]);
+  useEffect(() => { localStorage.setItem('pb_model', modelName); }, [modelName]);
+  useEffect(() => { localStorage.setItem('pb_thinking', enableThinking); }, [enableThinking]);
   
   const [room, setRoom] = useState(null);
   const [players, setPlayers] = useState([]);
@@ -168,7 +174,7 @@ export default function App() {
     setTestingEndpoint(true);
     setTestError('');
     try {
-      await callLLM(endpoint, modelName, 'You are a helpful assistant.', 'Say "OK" in one word.', apiKey);
+      await callLLM(endpoint, modelName, 'You are a helpful assistant.', 'Say "OK" in one word.', apiKey, enableThinking);
       setEndpointVerified(true);
       setTestError('');
     } catch (err) {
@@ -185,7 +191,7 @@ export default function App() {
     const code = generateRoomCode();
     const player = { id: generatePlayerId(), name: generatePlayerName(), isHost: true };
     setCurrentPlayer(player);
-    setRoom({ code, hostEndpoint: endpoint, hostModel: modelName, hostApiKey: apiKey, status: 'lobby' });
+    setRoom({ code, hostEndpoint: endpoint, hostModel: modelName, hostApiKey: apiKey, hostEnableThinking: enableThinking, status: 'lobby' });
     setPlayers([player]);
     setPhase(PHASES.LOBBY);
 
@@ -243,7 +249,7 @@ export default function App() {
     }
 
     try {
-      const response = await callLLM(room.hostEndpoint, room.hostModel, task.systemPrompt, playerPrompt, room.hostApiKey);
+        const response = await callLLM(room.hostEndpoint, room.hostModel, task.systemPrompt, playerPrompt, room.hostApiKey, room.hostEnableThinking);
       const result = { playerId, playerName, prompt: playerPrompt, response };
       setResults(prev => [...prev, result]);
       broadcast({ type: 'round:result', ...result });
@@ -333,7 +339,7 @@ export default function App() {
     if (tie) {
       const tiedSubmissions = Object.values(roundDataRef.current.results).filter(r => tie.includes(r.playerId));
       try {
-        const modelResponse = await callLLM(room.hostEndpoint, room.hostModel, 'You are a judge. Be decisive.', generateTiebreakerPrompt(task, tiedSubmissions), room.hostApiKey);
+          const modelResponse = await callLLM(room.hostEndpoint, room.hostModel, 'You are a judge. Be decisive.', generateTiebreakerPrompt(task, tiedSubmissions), room.hostApiKey, room.hostEnableThinking);
         const tieWinner = parseTiebreakerResponse(modelResponse, tie);
         roundScores[tieWinner]++;
       } catch (err) {
@@ -392,7 +398,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
       {screen === 'home' && <HomeScreen onCreate={() => setScreen('create')} onJoin={() => setScreen('join')} />}
-      {screen === 'create' && <CreateScreen endpoint={endpoint} setEndpoint={setEndpoint} apiKey={apiKey} setApiKey={setApiKey} modelName={modelName} setModelName={setModelName} onCreate={handleCreateRoom} onBack={() => setScreen('home')} onTest={handleTestEndpoint} testing={testingEndpoint} verified={endpointVerified} testError={testError} />}
+      {screen === 'create' && <CreateScreen endpoint={endpoint} setEndpoint={setEndpoint} apiKey={apiKey} setApiKey={setApiKey} modelName={modelName} setModelName={setModelName} enableThinking={enableThinking} setEnableThinking={setEnableThinking} onCreate={handleCreateRoom} onBack={() => setScreen('home')} onTest={handleTestEndpoint} testing={testingEndpoint} verified={endpointVerified} testError={testError} />}
       {screen === 'join' && <JoinScreen roomCode={roomCode} setRoomCode={setRoomCode} playerName={playerName} setPlayerName={setPlayerName} onJoin={handleJoinRoom} onBack={() => setScreen('home')} />}
       {screen === 'game' && room && (
         <GameScreen
@@ -424,7 +430,7 @@ function HomeScreen({ onCreate, onJoin }) {
   );
 }
 
-function CreateScreen({ endpoint, setEndpoint, apiKey, setApiKey, modelName, setModelName, onCreate, onBack, onTest, testing, verified, testError }) {
+function CreateScreen({ endpoint, setEndpoint, apiKey, setApiKey, modelName, setModelName, enableThinking, setEnableThinking, onCreate, onBack, onTest, testing, verified, testError }) {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-4">
       <div className="w-full max-w-md animate-fade-in">
@@ -444,6 +450,10 @@ function CreateScreen({ endpoint, setEndpoint, apiKey, setApiKey, modelName, set
             <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-... (for cloud endpoints)" className="w-full px-4 py-3 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-purple-500" />
             <p className="text-xs text-slate-500 mt-1">Only needed for OpenAI, Together, etc. Leave blank for local LLMs.</p>
           </div>
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={enableThinking} onChange={e => setEnableThinking(e.target.checked)} className="w-4 h-4 rounded bg-slate-700 border-slate-600 text-purple-600 focus:ring-purple-500" />
+            <span className="text-sm text-slate-300">Enable thinking (reasoning models)</span>
+          </label>
           <button onClick={onTest} disabled={testing || !endpoint || !modelName} className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-600 transition-all">
             {testing ? 'Testing...' : 'Test Connection'}
           </button>
