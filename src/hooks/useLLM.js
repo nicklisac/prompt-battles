@@ -23,13 +23,14 @@ export function useLLM() {
           temperature: 0.9,
           max_tokens: 2000,
         }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(120000),
       });
-      
+
       if (!response.ok) throw new Error(`LLM error: ${response.status} ${response.statusText}`);
-      
+
       const data = await response.json();
-      let content = data.choices?.[0]?.message?.content?.trim();
+      const msg = data.choices?.[0]?.message;
+      let content = msg?.content?.trim() || msg?.reasoning_content?.trim();
       if (!content) throw new Error('Empty response from model');
       
       // Clean up SVG output - remove markdown code fences
