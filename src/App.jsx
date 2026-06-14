@@ -13,6 +13,9 @@ export default function App() {
   const [apiKey, setApiKey] = useState('');
   const [modelName, setModelName] = useState('');
   const [playerName, setPlayerName] = useState('');
+  const [endpointVerified, setEndpointVerified] = useState(false);
+  const [testingEndpoint, setTestingEndpoint] = useState(false);
+  const [testError, setTestError] = useState('');
   
   const [room, setRoom] = useState(null);
   const [players, setPlayers] = useState([]);
@@ -42,7 +45,7 @@ export default function App() {
   }, [currentPlayer]);
   
   // Store for round data
-  const roundDataRef = useRef({ prompts: {}, results: {}, votes: [], gameScores: {}, gameTasks: [] });
+  const roundDataRef = useRef({ prompts: {}, results: {}, votes: [], gameScores: {}, gameTasks: [], processed: new Set() });
   
   // Timer for prompting phase
   useEffect(() => {
@@ -76,6 +79,7 @@ export default function App() {
         roundDataRef.current.prompts = {};
         roundDataRef.current.results = {};
         roundDataRef.current.votes = [];
+        roundDataRef.current.processed = new Set();
         setTimeout(() => setShowTask(true), 500);
         break;
       case 'round:prompting':
@@ -131,6 +135,7 @@ export default function App() {
         roundDataRef.current.prompts = {};
         roundDataRef.current.results = {};
         roundDataRef.current.votes = [];
+        roundDataRef.current.processed = new Set();
         setTimeout(() => setShowTask(true), 500);
         break;
       case 'game:end':
@@ -157,6 +162,23 @@ export default function App() {
     if (channelRef.current) channelRef.current.broadcast({ ...message, senderId: currentPlayer?.id });
   }, [currentPlayer]);
   
+  // Test LLM connection
+  const handleTestEndpoint = async () => {
+    if (!endpoint || !modelName) return;
+    setTestingEndpoint(true);
+    setTestError('');
+    try {
+      await callLLM(endpoint, modelName, 'You are a helpful assistant.', 'Say "OK" in one word.', apiKey);
+      setEndpointVerified(true);
+      setTestError('');
+    } catch (err) {
+      setEndpointVerified(false);
+      setTestError(err.message || 'Connection failed');
+    } finally {
+      setTestingEndpoint(false);
+    }
+  };
+
   // Create room as host
   const handleCreateRoom = () => {
     if (!endpoint || !modelName) return;
@@ -209,7 +231,43 @@ export default function App() {
     }, 3000);
   };
   
-  // Host: Process prompts
+  // Host: Send a single prompt to the LLM
+  const processSinglePrompt = useCallback(async (playerId, playerName, playerPrompt) => {
+    if (!currentPlayer?.isHost) return;
+    if (roundDataRef.current.processed.has(playerId)) return;
+    roundDataRef.current.processed.add(playerId);
+
+    if (phase !== PHASES.PROCESSING) {
+      setPhase(PHASES.PROCESSING);
+      broadcast({ type: 'round:processing' });
+    }
+
+    try {
+      const response = await callLLM(room.hostEndpoint, room.hostModel, task.systemPrompt, playerPrompt, room.hostApiKey);
+      const result = { playerId, playerName, prompt: playerPrompt, response };
+      setResults(prev => [...prev, result]);
+      broadcast({ type: 'round:result', ...result });
+    } catch (err) {
+      console.error(`Failed for ${playerName}:`, err);
+      const result = { playerId, playerName, prompt: playerPrompt, response: '[Error: Model failed to respond]' };
+      setResults(prev => [...prev, result]);
+      broadcast({ type: 'round:result', ...result });
+    }
+
+    // Check if all prompts are done
+    const submitted = players.filter(p => roundDataRef.current.prompts[p.id]);
+    if (roundDataRef.current.processed.size >= submitted.length && submitted.length > 0) {
+      broadcast({ type: 'round:results-ready' });
+      setPhase(PHASES.RESULTS);
+    }
+  }, [currentPlayer, players, room, task, phase, broadcast, callLLM]);
+
+  const processSingleRef = useRef(null);
+  useEffect(() => {
+    processSingleRef.current = processSinglePrompt;
+  }, [processSinglePrompt]);
+
+  // Host: Process all prompts (called when timer expires)
   const processPrompts = useCallback(async () => {
     if (!currentPlayer?.isHost) return;
 
@@ -219,24 +277,15 @@ export default function App() {
     const prompts = roundDataRef.current.prompts;
     const playerPrompts = players.filter(p => prompts[p.id]).map(p => ({ playerId: p.id, playerName: p.name, prompt: prompts[p.id] }));
 
-    setResults([]);
-
-    for (let i = 0; i < playerPrompts.length; i++) {
-      const { playerId, playerName: pn, prompt: pp } = playerPrompts[i];
-      try {
-        const response = await callLLM(room.hostEndpoint, room.hostModel, task.systemPrompt, pp, room.hostApiKey);
-        const result = { playerId, playerName: pn, prompt: pp, response };
-        setResults(prev => [...prev, result]);
-        broadcast({ type: 'round:result', ...result, progress: ((i + 1) / playerPrompts.length) * 100 });
-      } catch (err) {
-        console.error(`Failed for ${pn}:`, err);
-        broadcast({ type: 'round:result', playerId, playerName: pn, prompt: pp, response: '[Error: Model failed to respond]', progress: ((i + 1) / playerPrompts.length) * 100 });
-      }
+    for (const { playerId, playerName, prompt: pp } of playerPrompts) {
+      await processSinglePrompt(playerId, playerName, pp);
     }
 
-    broadcast({ type: 'round:results-ready' });
-    setPhase(PHASES.RESULTS);
-  }, [currentPlayer, players, room, task, broadcast, callLLM]);
+    if (playerPrompts.length > 0) {
+      broadcast({ type: 'round:results-ready' });
+      setPhase(PHASES.RESULTS);
+    }
+  }, [currentPlayer, players, room, task, broadcast, callLLM, processSinglePrompt]);
 
   useEffect(() => {
     processPromptsRef.current = processPrompts;
@@ -246,7 +295,16 @@ export default function App() {
   const handleSubmitPrompt = () => {
     if (!prompt.trim() || promptSubmitted) return;
     setPromptSubmitted(true);
-    broadcast({ type: 'prompt:submit', playerId: currentPlayer.id, prompt: prompt.trim() });
+    const trimmed = prompt.trim();
+    broadcast({ type: 'prompt:submit', playerId: currentPlayer.id, prompt: trimmed });
+
+    // Host: store own prompt and send to LLM immediately
+    if (currentPlayer?.isHost) {
+      roundDataRef.current.prompts[currentPlayer.id] = trimmed;
+      if (processSingleRef.current) {
+        processSingleRef.current(currentPlayer.id, currentPlayer.name, trimmed);
+      }
+    }
   };
   
   // Host: Start voting
@@ -306,6 +364,7 @@ export default function App() {
       roundDataRef.current.prompts = {};
       roundDataRef.current.results = {};
       roundDataRef.current.votes = [];
+      roundDataRef.current.processed = new Set();
       const nextMsg = { type: 'round:next', round: round + 1, task: nextTask };
       applyMessageRef.current(nextMsg);
       broadcast(nextMsg);
@@ -333,7 +392,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
       {screen === 'home' && <HomeScreen onCreate={() => setScreen('create')} onJoin={() => setScreen('join')} />}
-      {screen === 'create' && <CreateScreen endpoint={endpoint} setEndpoint={setEndpoint} apiKey={apiKey} setApiKey={setApiKey} modelName={modelName} setModelName={setModelName} onCreate={handleCreateRoom} onBack={() => setScreen('home')} />}
+      {screen === 'create' && <CreateScreen endpoint={endpoint} setEndpoint={setEndpoint} apiKey={apiKey} setApiKey={setApiKey} modelName={modelName} setModelName={setModelName} onCreate={handleCreateRoom} onBack={() => setScreen('home')} onTest={handleTestEndpoint} testing={testingEndpoint} verified={endpointVerified} testError={testError} />}
       {screen === 'join' && <JoinScreen roomCode={roomCode} setRoomCode={setRoomCode} playerName={playerName} setPlayerName={setPlayerName} onJoin={handleJoinRoom} onBack={() => setScreen('home')} />}
       {screen === 'game' && room && (
         <GameScreen
@@ -365,7 +424,7 @@ function HomeScreen({ onCreate, onJoin }) {
   );
 }
 
-function CreateScreen({ endpoint, setEndpoint, apiKey, setApiKey, modelName, setModelName, onCreate, onBack }) {
+function CreateScreen({ endpoint, setEndpoint, apiKey, setApiKey, modelName, setModelName, onCreate, onBack, onTest, testing, verified, testError }) {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-4">
       <div className="w-full max-w-md animate-fade-in">
@@ -385,9 +444,14 @@ function CreateScreen({ endpoint, setEndpoint, apiKey, setApiKey, modelName, set
             <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-... (for cloud endpoints)" className="w-full px-4 py-3 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-purple-500" />
             <p className="text-xs text-slate-500 mt-1">Only needed for OpenAI, Together, etc. Leave blank for local LLMs.</p>
           </div>
-          <div className="flex gap-3 pt-4">
+          <button onClick={onTest} disabled={testing || !endpoint || !modelName} className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-slate-600 transition-all">
+            {testing ? 'Testing...' : 'Test Connection'}
+          </button>
+          {verified && <p className="text-center text-sm text-green-400">Connection successful!</p>}
+          {testError && <p className="text-center text-sm text-red-400">{testError}</p>}
+          <div className="flex gap-3 pt-2">
             <button onClick={onBack} className="flex-1 px-4 py-3 bg-slate-800 border border-slate-600 rounded-lg hover:border-slate-500 transition-all">Back</button>
-            <button onClick={onCreate} disabled={!endpoint || !modelName} className="flex-1 px-4 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:from-purple-500 hover:to-pink-500 transition-all">Create</button>
+            <button onClick={onCreate} disabled={!verified} className="flex-1 px-4 py-3 bg-gradient-to-r from-purple-600 to-pink-600 rounded-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:from-purple-500 hover:to-pink-500 transition-all">Create</button>
           </div>
         </div>
       </div>
