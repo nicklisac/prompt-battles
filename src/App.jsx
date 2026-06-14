@@ -250,12 +250,12 @@ export default function App() {
 
     try {
         const response = await callLLM(room.hostEndpoint, room.hostModel, task.systemPrompt, playerPrompt, room.hostApiKey, room.hostEnableThinking);
-      const result = { playerId, playerName, prompt: playerPrompt, response };
+      const result = { playerId, playerName, prompt: playerPrompt, response, renderMode: task.renderMode || 'text' };
       setResults(prev => [...prev, result]);
       broadcast({ type: 'round:result', ...result });
     } catch (err) {
       console.error(`Failed for ${playerName}:`, err);
-      const result = { playerId, playerName, prompt: playerPrompt, response: '[Error: Model failed to respond]' };
+      const result = { playerId, playerName, prompt: playerPrompt, response: '[Error: Model failed to respond]', renderMode: task.renderMode || 'text' };
       setResults(prev => [...prev, result]);
       broadcast({ type: 'round:result', ...result });
     }
@@ -620,16 +620,7 @@ function ResultsPhase({ results, isHost, onStartVoting }) {
             </div>
             <div>
               <div className="text-xs text-slate-500 mb-1">Output:</div>
-              {isSvgResult(result.response) ? (() => {
-                  const safe = sanitizeSvg(result.response);
-                  return safe ? (
-                    <div className="svg-result" dangerouslySetInnerHTML={{ __html: safe }} />
-                  ) : (
-                    <div className="bg-white text-slate-900 rounded-lg p-4 whitespace-pre-wrap">{result.response}</div>
-                  );
-                })() : (
-                <div className="bg-white text-slate-900 rounded-lg p-4 whitespace-pre-wrap">{result.response}</div>
-              )}
+              {renderResult(result)}
             </div>
           </div>
         ))}
@@ -663,7 +654,7 @@ function VotingPhase({ results, currentPlayer, votes, onCastVote, onCalculateSco
                 {isSelf && <span className="text-xs text-slate-500">(you)</span>}
                 {isSelected && <span className="text-xs text-purple-400">✓ voted</span>}
               </div>
-              <div className="text-xs text-slate-500 truncate">{isSvgResult(result.response) ? '🎨 SVG Art' : result.response.substring(0, 100) + '...'}</div>
+              <div className="text-xs text-slate-500 truncate">{getResultLabel(result.response)}</div>
             </button>
           );
         })}
@@ -750,4 +741,47 @@ function sanitizeSvg(html) {
   });
   svg.querySelectorAll('script').forEach(s => s.remove());
   return svg.outerHTML;
+}
+
+function HtmlIframeRender({ html }) {
+  const srcDoc = encodeURIComponent(html);
+  return (
+    <iframe
+      className="html-result"
+      title="LLM HTML output"
+      srcDoc={html}
+      sandbox="allow-scripts"
+      frameBorder="0"
+    />
+  );
+}
+
+function renderResult(result) {
+  const mode = result.renderMode || 'text';
+  const response = result.response || '';
+
+  if (mode === 'html') {
+    // Strip markdown fences if present
+    const cleaned = response.startsWith('```')
+      ? response.replace(/^```\\w*\\s*/i, '').replace(/\\s*```$/i, '').trim()
+      : response.trim();
+    if (cleaned.startsWith('<!DOCTYPE') || cleaned.startsWith('<html') || cleaned.startsWith('<div')) {
+      return <HtmlIframeRender html={cleaned} />;
+    }
+    // Fallback to text
+    return <div className="bg-white text-slate-900 rounded-lg p-4 whitespace-pre-wrap">{response}</div>;
+  }
+
+  if (mode === 'svg' || isSvgResult(response)) {
+    const safe = sanitizeSvg(response);
+    if (safe) return <div className="svg-result" dangerouslySetInnerHTML={{ __html: safe }} />;
+    return <div className="bg-white text-slate-900 rounded-lg p-4 whitespace-pre-wrap">{response}</div>;
+  }
+
+  return <div className="bg-white text-slate-900 rounded-lg p-4 whitespace-pre-wrap">{response}</div>;
+}
+
+function getResultLabel(response) {
+  if (isSvgResult(response)) return '🎨 SVG Art';
+  return response.substring(0, 100) + '...';
 }
